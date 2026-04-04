@@ -13,6 +13,8 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 
 file_path = os.path.join(base_dir, "prompt.txt")
 
+PDF_PATH = os.path.join(base_dir, "aetna1.pdf")
+
 client = genai.Client(api_key=API_KEY)
 
 
@@ -44,7 +46,7 @@ def generate_payers_json(pdf_paths: list[str]):
 
 
 if __name__ == "__main__":
-    generate_payers_json()
+    generate_payers_json(PDF_PATH)
 
 
 
