@@ -9,9 +9,14 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 
 load_dotenv(os.path.join(base_dir, "key.env"))
 
+API_KEY = os.getenv("GEMINI_API_KEY")
+
 file_path = os.path.join(base_dir, "prompt.txt")
 
-def generate_payers_json():
+client = genai.Client(api_key=API_KEY)
+
+
+def generate_payers_json(pdf_paths: list[str]):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             prompt_content = f.read()
@@ -20,7 +25,23 @@ def generate_payers_json():
 
     prompt = prompt_content
 
-    print(prompt)
+    uploaded_files = []
+    for path in pdf_paths:
+        uploaded = client.files.upload(
+            file=path,
+            config={"mime_type": "application/pdf"}
+        )
+        uploaded_files.append(uploaded)
+
+    contents = [prompt] + uploaded_files
+
+    response = client.models.generate_content(
+        model="gemini-3.1-flash",
+        contents=contents
+    )
+
+    return response.text
+
 
 if __name__ == "__main__":
     generate_payers_json()
