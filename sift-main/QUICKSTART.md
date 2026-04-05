@@ -20,9 +20,9 @@ pip install -r requirements.txt
 Create `AI_Parser/key.env`:
 
 ```env
-GEMINI_API_KEY=AIzaSyA7WYrB07q7H4qiRyZ5QHOmoJ18BEi4SQs
+GEMINI_API_KEY={YOUR_API_KEY} 
 ```
-
+#(ps: YOUR_API_KEY means you put your actual GEMINI api key inside. 
 Get your API key from: https://ai.google.dev/
 
 ### Step 3: Start Backend Server
