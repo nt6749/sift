@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import pdfplumber
 import requests
 import urllib
+from playwright.sync_api import sync_playwright
 
 from classification import classify_policy_document
 from parser import extract_structured_json
@@ -19,6 +20,9 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 # ----------------------------
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 REQUEST_HEADERS = {"User-Agent": USER_AGENT}
+# For healthemblem
+BASE_URL = "https://gatewaypa.com/emblemhealth/policydisplay/55"
+DOWNLOAD_PREFIX = "https://gatewaypa.com/"
 
 SECTION_KEYWORDS = [
     "policy",
@@ -414,7 +418,74 @@ def search_and_process_limited(
 # ----------------------------
 # PLACE_HOLDER (add emblem health)
 # ----------------------------
+def download_drug_policy(drug_name):
+    """
+    Inputs a drug name, intercepts the gateway data, 
+    and downloads the matching PDF.
+    """
+    with sync_playwright() as p:
+        # Launching browser
+        # Set headless=False if you want to see the window pop up
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
+        print(f"Accessing Gateway for: {drug_name}...")
+        
+        intercepted_data = []
+
+        # Internal listener to catch the JSON directory
+        def handle_response(response):
+            if "/api/policydisplay/" in response.url and response.status == 200:
+                try:
+                    intercepted_data.append(response.json())
+                except:
+                    pass
+
+        page.on("response", handle_response)
+        
+        try:
+            # Navigate and wait for the table to populate
+            page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(3000) 
+
+            if not intercepted_data:
+                print("Error: No API data intercepted.")
+                browser.close()
+                return None
+
+            os.makedirs("downloads", exist_ok=True)
+
+            # Search logic
+            for data in intercepted_data:
+                sections = data.get("linkSections", []) if isinstance(data, dict) else []
+                for section in sections:
+                    for link in section.get("links", []):
+                        # Matching against linkText and SubText
+                        text = f"{link.get('linkText','')} {link.get('linkSubText','')}".lower()
+                        
+                        if drug_name.lower() in text:
+                            url_path = link.get("linkUrl", "").lstrip('/')
+                            final_url = f"{DOWNLOAD_PREFIX}{url_path}"
+                            
+                            print(f"Downloading: {link.get('linkText')}")
+                            
+                            # Perform download using the browser's authenticated context
+                            pdf_download = page.request.get(final_url)
+                            if pdf_download.status == 200:
+                                filename = f"downloads/{drug_name.replace(' ', '_')}.pdf"
+                                with open(filename, "wb") as f:
+                                    f.write(pdf_download.body())
+                                print(f"Success: Saved to {filename}")
+                                browser.close()
+                                return filename
+            
+            print(f"Could not find a policy matching '{drug_name}'")
+            
+        except Exception as e:
+            print(f"Execution Error: {e}")
+        
+        browser.close()
+        return None
 
 # ----------------------------
 # 7. Main
