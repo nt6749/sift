@@ -38,7 +38,7 @@ def generate_payers_json(pdf_paths: list[str]):
     contents = [prompt] + uploaded_files
 
     response = client.models.generate_content(
-        model="gemini-3.1-flash",
+        model="gemini-3-flash-preview",
         contents=contents
     )
 
@@ -46,7 +46,8 @@ def generate_payers_json(pdf_paths: list[str]):
 
 
 if __name__ == "__main__":
-    generate_payers_json(PDF_PATH)
+    print(generate_payers_json([PDF_PATH]))
+    
 
 
 
