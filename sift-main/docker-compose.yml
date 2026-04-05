@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  backend:
+    container_name: policy-extraction-backend
+    build:
+      context: ./AI_Parser
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./AI_Parser/uploads:/app/uploads
+    networks:
+      - policy-network
+    restart: unless-stopped
+
+  frontend:
+    container_name: policy-extraction-frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:5000
+    depends_on:
+      - backend
+    networks:
+      - policy-network
+    restart: unless-stopped
+
+networks:
+  policy-network:
+    driver: bridge
