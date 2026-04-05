@@ -24,6 +24,7 @@ Rules:
 19. For site_of_care.restrictions, include each restriction as a separate string.
 20. For policy_metadata fields, extract only if explicitly available in the text.
 
+
 Return exactly this JSON structure:
 
 {
