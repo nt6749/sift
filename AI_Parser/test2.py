@@ -5,14 +5,14 @@ import logging
 import time
 from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
-from google import genai
 import pdfplumber
 import requests
 import urllib
-from dotenv import load_dotenv
+
+from classification import classify_policy_document
+from parser import extract_structured_json
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-load_dotenv("key.env")
 
 # ----------------------------
 # Config
@@ -38,144 +38,61 @@ SECTION_KEYWORDS = [
     "authorization"
 ]
 
-# ----------------------------
-# Gemini setup
-# ----------------------------
-API_KEY = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=API_KEY)
-
-MODEL_NAME = "gemini-2.5-flash"
-
-GENERAL_EXTRACTION_PROMPT = """
-You are an information extraction agent.
-
-Your task is to read the provided medical policy text and extract the relevant structured information exactly in the JSON format below.
-
-Rules:
-1. Output valid JSON only.
-2. Do not include markdown, explanations, comments, or extra text.
-3. Do not add fields that are not in the schema.
-4. Preserve the exact field names and nesting.
-5. If a value is not stated in the text, use null.
-6. If a boolean-style coverage requirement is unclear or not explicitly stated, use "unknown" where allowed.
-7. For arrays, return [] if no items are found.
-8. Normalize dates to YYYY-MM-DD when possible; otherwise use null.
-9. Do not guess. Only extract what is supported by the text.
-10. If multiple covered indications, PA criteria, step therapy steps, site-of-care restrictions, or dosing/quantity limits are present, include all of them.
-11. For payer_name, extract the payer or health plan name from the text if present; otherwise use null.
-12. For access_status.status, only use one of: "preferred", "non-preferred", "restricted", "unknown".
-13. For coverage.covered, prior_authorization.required, and step_therapy.required, only use one of: true, false, "unknown".
-14. If the text mentions both brand and generic drug names, place them in their correct fields. If only one is explicitly available, fill that field and use null for the other.
-15. For covered_indications, extract each condition separately. Put any approval conditions tied to that indication into the "criteria" field.
-16. For prior_authorization.criteria, include each requirement as a separate string.
-17. For step_therapy.steps, preserve the order if the text implies an order. Use step_number starting at 1.
-18. For dosing_and_quantity_limits.limits.type, only use one of: "dose", "frequency", "quantity".
-19. For site_of_care.restrictions, include each restriction as a separate string.
-20. For policy_metadata fields, extract only if explicitly available in the text.
-
-Return exactly this JSON structure:
-
-{
-  "payer_name": null,
-  "drug_name": {
-    "brand": null,
-    "generic": null
-  },
-  "drug_category": null,
-  "access_status": {
-    "status": "unknown",
-    "preferred_count_in_category": null,
-    "notes": null
-  },
-  "coverage": {
-    "covered": "unknown",
-    "covered_indications": []
-  },
-  "prior_authorization": {
-    "required": "unknown",
-    "criteria": []
-  },
-  "step_therapy": {
-    "required": "unknown",
-    "steps": []
-  },
-  "site_of_care": {
-    "restrictions": [],
-    "notes": null
-  },
-  "dosing_and_quantity_limits": {
-    "limits": []
-  },
-  "policy_metadata": {
-    "effective_date": null,
-    "policy_name": null,
-    "policy_id": null,
-    "source_file": null
-  }
-}
-
-Expected object formats inside arrays:
-
-covered_indications item:
-{
-  "condition": "string",
-  "criteria": "string or null"
-}
-
-step_therapy.steps item:
-{
-  "step_number": 1,
-  "required_drug_or_class": "string",
-  "notes": "string or null"
-}
-
-dosing_and_quantity_limits.limits item:
-{
-  "type": "dose",
-  "value": "string",
-  "notes": "string or null"
-}
-
-Now extract the information from the provided text and return only the completed JSON.
-""".strip()
 
 # ----------------------------
 # 1. Search
 # ----------------------------
-def search_duckduckgo(query: str, max_results: int = 10) -> List[str]:
+def search_duckduckgo(query: str, max_results: int = 10, retries: int = 3) -> List[str]:
     url = "https://html.duckduckgo.com/html/"
 
-    try:
-        response = requests.post(
-            url,
-            data={"q": query},
-            headers=REQUEST_HEADERS,
-            timeout=20
-        )
-        response.raise_for_status()
+    for attempt in range(retries):
+        try:
+            # Rotate user agents to avoid blocks
+            user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15",
+                "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
+            ]
+            headers = {"User-Agent": user_agents[attempt % len(user_agents)]}
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        links = []
+            response = requests.post(
+                url,
+                data={"q": query},
+                headers=headers,
+                timeout=20
+            )
+            response.raise_for_status()
 
-        for a in soup.find_all("a", class_="result__a"):
-            href = a.get("href")
-            if not href:
-                continue
+            soup = BeautifulSoup(response.text, "html.parser")
+            links = []
 
-            if href.startswith("/l/?uddg="):
-                decoded_url = urllib.parse.unquote(
-                    href.split("uddg=")[1].split("&rut=")[0]
-                )
-                links.append(decoded_url)
-            else:
-                links.append(href)
+            for a in soup.find_all("a", class_="result__a"):
+                href = a.get("href")
+                if not href:
+                    continue
+                if href.startswith("/l/?uddg="):
+                    decoded_url = urllib.parse.unquote(
+                        href.split("uddg=")[1].split("&rut=")[0]
+                    )
+                    links.append(decoded_url)
+                else:
+                    links.append(href)
 
-        return list(dict.fromkeys(links))[:max_results]
+            results = list(dict.fromkeys(links))[:max_results]
 
-    except Exception as e:
-        logging.error(f"Search failed for query '{query}': {e}")
-        return []
+            if results:
+                return results
 
+            # Got a response but no links — likely a block page
+            logging.warning(f"DDG returned no links on attempt {attempt + 1}, waiting before retry...")
+            time.sleep(5 * (attempt + 1))  # 5s, 10s, 15s backoff
+
+        except Exception as e:
+            logging.error(f"Search failed (attempt {attempt + 1}): {e}")
+            time.sleep(5 * (attempt + 1))
+
+    logging.error(f"All DDG retries failed for: {query}")
+    return []
 
 def domain_matches(url: str, allowed_domains: List[str]) -> bool:
     try:
@@ -186,8 +103,7 @@ def domain_matches(url: str, allowed_domains: List[str]) -> bool:
         )
     except Exception:
         return False
-
-
+    
 def search_queries_for_drug(
     drug_name: str,
     query_templates: List[str],
@@ -263,6 +179,41 @@ def download_file(url: str, output_dir: str) -> Optional[str]:
 
 
 # ----------------------------
+# 2.5 Pick one file per source bucket
+# ----------------------------
+def looks_like_pdf(url: str) -> bool:
+    return ".pdf" in url.lower()
+
+
+def pick_top_sources(results: List[Dict[str, str]], wanted_sources: List[str]) -> List[str]:
+    """
+    Pick the first PDF result for each requested source.
+    No domain checker. Source is decided only by the query group.
+    """
+    chosen = []
+    picked = set()
+
+    for source in wanted_sources:
+        for r in results:
+            if r["source"] != source:
+                continue
+
+            url = r["url"]
+
+            if source == "mdl":
+                chosen.append(url)
+                picked.add(source)
+                break
+
+            if looks_like_pdf(url):
+                chosen.append(url)
+                picked.add(source)
+                break
+
+    return chosen
+
+
+# ----------------------------
 # 3. PDF extraction
 # ----------------------------
 def extract_pages_from_pdf(filepath: str) -> List[Dict[str, Any]]:
@@ -294,7 +245,8 @@ def contains_any(text: str, keywords: List[str]) -> bool:
 def build_extraction_text(
     doc: Dict[str, Any],
     drug_keywords: List[str],
-    max_pages: int = 20
+    max_pages: int = 20,
+    multi_window: int = 2
 ) -> str:
     classification = doc.get("classification", "unknown")
     pages = doc.get("pages", [])
@@ -311,22 +263,15 @@ def build_extraction_text(
             selected.append(page)
             selected_page_nums.add(pnum)
 
-    # Always include first page
     add_page(pages[0])
 
-    if classification == "single_drug_simple":
+    if classification == "single_drug":
         for page in pages[1:]:
             text = page.get("text", "")
             if contains_any(text, SECTION_KEYWORDS) or contains_any(text, drug_keywords):
                 add_page(page)
 
-    elif classification == "single_drug_mixed":
-        for page in pages[1:]:
-            text = page.get("text", "")
-            if contains_any(text, SECTION_KEYWORDS) or contains_any(text, drug_keywords):
-                add_page(page)
-
-    elif classification == "multi_drug_large":
+    elif classification == "multi_drug":
         hit_indices = []
         for i, page in enumerate(pages):
             text = page.get("text", "")
@@ -335,7 +280,7 @@ def build_extraction_text(
 
         expanded = set()
         for i in hit_indices:
-            for j in range(max(0, i - 1), min(len(pages), i + 2)):
+            for j in range(max(0, i - 1), min(len(pages), i + multi_window + 1)):
                 expanded.add(j)
 
         for idx in sorted(expanded):
@@ -347,13 +292,12 @@ def build_extraction_text(
 
     selected = selected[:max_pages]
 
-    print("Selected pages:", [p["page_number"] for p in selected])
+    logging.info(f"Selected pages: {[p['page_number'] for p in selected]}")
 
     blocks = []
     for i, page in enumerate(selected):
         page_num = page.get("page_number", "?")
         text = page.get("text", "")
-
         label = "METADATA PAGE" if i == 0 else "RELEVANT PAGE"
         blocks.append(f"=== {label} {page_num} ===\n{text}")
 
@@ -361,82 +305,140 @@ def build_extraction_text(
 
 
 # ----------------------------
-# 5. Gemini call
+# 5. Processing helper
 # ----------------------------
-def run_extraction(model_name: str, prepared_text: str) -> Dict[str, Any]:
-    prompt = GENERAL_EXTRACTION_PROMPT + "\n\nPolicy text:\n" + prepared_text
-    response = client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=prompt
-    )
-
-    raw = response.text.strip()
-
-    raw = re.sub(r"^```json\s*", "", raw)
-    raw = re.sub(r"^```\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-
-    return json.loads(raw)
-
-# ----------------------------
-# 6. Small manual test
-# ----------------------------
-if __name__ == "__main__":
-    drug_name = "Rituximab"
-    drug_keywords = ["rituximab", "rituxan"]
-
-    query_templates = [
-        'https://fm.formularynavigator.com/FBO/208/MDL_EmployerGroupMyPriority_2026.pdf'
-    ]
-
-    results = search_queries_for_drug(
-        drug_name=drug_name,
-        query_templates=query_templates,
-        allowed_domains=None,
-        max_results_per_query=5
-    )
-
-    if not results:
-        print("No search results found.")
-        raise SystemExit
-
-    pdf_results = [r for r in results if r["url"].lower().endswith(".pdf")]
-    if not pdf_results:
-        print("No PDF results found.")
-        raise SystemExit
-
-    test_url = pdf_results[0]["url"]
-    print("Testing URL:", test_url)
-
-    filepath = download_file(test_url, "test_docs")
-    if not filepath:
-        print("Download failed.")
-        raise SystemExit
-
+def process_one_file(
+    filepath: str,
+    drug_name: str,
+    drug_keywords: List[str]
+) -> Dict[str, Any]:
     pages = extract_pages_from_pdf(filepath)
     if not pages:
-        print("No PDF text extracted.")
-        raise SystemExit
+        raise ValueError(f"No PDF text extracted from {filepath}")
 
-    doc1 = {
+    classification = classify_policy_document(filepath)
+    logging.info(f"Classification for {os.path.basename(filepath)}: {classification}")
+
+    doc = {
         "source_file": filepath,
-        "classification": "multi_drug_large",
+        "classification": classification,
         "pages": pages
     }
 
-    prepared_text = build_extraction_text(doc1, drug_keywords, max_pages=20) + f"EXTRACT DATA FOR '{drug_name}' ONLY.\n\n"
+    prepared_text = (
+        build_extraction_text(doc, drug_keywords, max_pages=20, multi_window=2)
+        + f"\n\nEXTRACT DATA FOR '{drug_name}' ONLY.\n"
+    )
 
-    print("\n===== PREPARED TEXT PREVIEW =====\n")
-    print(prepared_text[:3000])
+    logging.info("===== PREPARED TEXT PREVIEW =====")
+    logging.info(prepared_text[:2000])
 
-    result = run_extraction(MODEL_NAME, prepared_text)
+    result = extract_structured_json(
+        prepared_text=prepared_text,
+        target_drug=drug_name,
+        source_file=filepath
+    )
 
-    output_file = "medical_policy_extractions.jsonl"
+    return result
 
-    with open(output_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
-    print(f"\nSaved result to {output_file}")
+# ----------------------------
+# 6. Search + limited processing (FIXED)
+# ----------------------------
+def search_and_process_limited(
+    drug_name: str,
+    drug_keywords: List[str],
+    query_templates: List[str],
+    output_dir: str = "test_docs",
+    output_jsonl: str = "medical_policy_extractions.jsonl"
+) -> List[Dict[str, Any]]:
 
-    print("\n===== EXTRACTION RESULT =====\n")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    urls_to_download = []
+
+    for template in query_templates:
+        if template.startswith("http"):
+            logging.info(f"Direct URL: {template}")
+            urls_to_download.append(template)
+        else:
+            query = template.format(drug=drug_name)
+            logging.info(f"DDG search: {query}")
+
+            # Delay between queries to avoid rate limiting
+            time.sleep(4)
+
+            search_results = search_duckduckgo(query, max_results=5)
+
+            if not search_results:
+                logging.warning(f"No results for '{query}'")
+            else:
+                # Filter to PDFs only for text queries
+                pdf_urls = [u for u in search_results if u.lower().endswith(".pdf")]
+                if pdf_urls:
+                    urls_to_download.append(pdf_urls[0])
+                else:
+                    logging.warning(f"No PDFs found in results for '{query}', skipping")
+
+    urls_to_download = list(dict.fromkeys(urls_to_download))
+
+    if not urls_to_download:
+        logging.error("No URLs to process.")
+        return []
+
+    logging.info(f"Downloading {len(urls_to_download)} URLs...")
+
+    downloaded_files = []
+    for url in urls_to_download:
+        filepath = download_file(url, output_dir)
+        if filepath:
+            # Sanity check — make sure it's actually a PDF
+            with open(filepath, "rb") as f:
+                header = f.read(5)
+            if not header.startswith(b"%PDF-"):
+                logging.warning(f"Not a PDF, skipping: {url}")
+                os.remove(filepath)
+                continue
+            downloaded_files.append(filepath)
+
+    extracted_results = []
+    for filepath in downloaded_files:
+        try:
+            result = process_one_file(filepath, drug_name, drug_keywords)
+            extracted_results.append(result)
+            with open(output_jsonl, "a", encoding="utf-8") as f:
+                f.write(json.dumps(result, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logging.error(f"Extraction failed for {filepath}: {e}")
+
+    return extracted_results
+
+# ----------------------------
+# PLACE_HOLDER (add emblem health)
+# ----------------------------
+
+
+# ----------------------------
+# 7. Main
+# ----------------------------
+def parserA(drug: str, drug_keywords: list[str]):
+    # name of the drug and other name in the family
+    drug_name = drug
+    drug_keywords = drug_keywords
+
+    # work with 3 for now may change for the future 
+    query_templates = [
+        'https://fm.formularynavigator.com/FBO/208/MDL_EmployerGroupMyPriority_2026.pdf',
+        'Cigna Drug and Biologic Coverage Policy {drug} pdf',
+        'UnitedHealthcare Commercial Medical & Drug Policies {drug} pdf'
+    ]
+
+    # search the web
+    results = search_and_process_limited(
+        drug_name=drug_name,
+        drug_keywords=drug_keywords,
+        query_templates=query_templates,
+        output_dir="test_docs",
+        output_jsonl="medical_policy_extractions.jsonl"
+    )
+
+    # log checker
+    # print(f"\nSaved {len(results)} records to medical_policy_extractions.jsonl")
