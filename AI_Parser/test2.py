@@ -349,6 +349,23 @@ def process_one_file(
 # ----------------------------
 # 6. Search + limited processing (FIXED)
 # ----------------------------
+def load_existing_records(output_jsonl: str) -> set:
+    seen = set()
+    if not os.path.exists(output_jsonl):
+        return seen
+    with open(output_jsonl, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                record = json.loads(line)
+                meta = record.get("policy_metadata", {})
+                src = meta.get("source_file")
+                date = meta.get("effective_date")
+                if src or date:
+                    seen.add((src, date))
+            except Exception:
+                continue
+    return seen
+
 def search_and_process_limited(
     drug_name: str,
     drug_keywords: List[str],
@@ -384,32 +401,54 @@ def search_and_process_limited(
 
     urls_to_download = list(dict.fromkeys(urls_to_download))
 
+    downloaded_files = []
+
+    # --- EmblemHealth ---
+    logging.info(f"Fetching EmblemHealth policy for: {drug_name}")
+    emblem_filepath = download_drug_policy(drug_name)
+    if emblem_filepath:
+        downloaded_files.append(emblem_filepath)
+    else:
+        logging.warning(f"EmblemHealth: no policy found for '{drug_name}'")
+
     if not urls_to_download:
         logging.error("No URLs to process.")
+    else:
+        logging.info(f"Downloading {len(urls_to_download)} URLs...")
+        for url in urls_to_download:
+            filepath = download_file(url, output_dir)
+            if filepath:
+                with open(filepath, "rb") as f:
+                    header = f.read(5)
+                if not header.startswith(b"%PDF-"):
+                    logging.warning(f"Not a PDF, skipping: {url}")
+                    os.remove(filepath)
+                    continue
+                downloaded_files.append(filepath)
+    
+    if not downloaded_files:
+        logging.error("No valid files to extract from.")
         return []
 
-    logging.info(f"Downloading {len(urls_to_download)} URLs...")
-
-    downloaded_files = []
-    for url in urls_to_download:
-        filepath = download_file(url, output_dir)
-        if filepath:
-            # Sanity check — make sure it's actually a PDF
-            with open(filepath, "rb") as f:
-                header = f.read(5)
-            if not header.startswith(b"%PDF-"):
-                logging.warning(f"Not a PDF, skipping: {url}")
-                os.remove(filepath)
-                continue
-            downloaded_files.append(filepath)
-
     extracted_results = []
+    existing = load_existing_records(output_jsonl)
+
     for filepath in downloaded_files:
         try:
             result = process_one_file(filepath, drug_name, drug_keywords)
+            meta = result.get("policy_metadata", {})
+            key = (meta.get("source_file"), meta.get("effective_date"))
+
+            if key in existing:
+                logging.info(f"Skipping duplicate: {key}")
+                continue
+
             extracted_results.append(result)
+            existing.add(key)
+
             with open(output_jsonl, "a", encoding="utf-8") as f:
                 f.write(json.dumps(result, ensure_ascii=False) + "\n")
+
         except Exception as e:
             logging.error(f"Extraction failed for {filepath}: {e}")
 
