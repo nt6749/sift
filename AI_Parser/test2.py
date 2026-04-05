@@ -39,7 +39,9 @@ SECTION_KEYWORDS = [
     "dose",
     "frequency",
     "medically necessary",
-    "authorization"
+    "authorization",
+    "revisions",
+    "revisions details"
 ]
 
 
@@ -249,7 +251,7 @@ def contains_any(text: str, keywords: List[str]) -> bool:
 def build_extraction_text(
     doc: Dict[str, Any],
     drug_keywords: List[str],
-    max_pages: int = 20,
+    max_pages: int = 22,
     multi_window: int = 2
 ) -> str:
     classification = doc.get("classification", "unknown")
@@ -290,11 +292,18 @@ def build_extraction_text(
         for idx in sorted(expanded):
             add_page(pages[idx])
 
+        # Cap only for multi_drug — these docs can be huge
+        selected = selected[:max_pages]
+
     else:
         for page in pages[1:4]:
             add_page(page)
 
-    selected = selected[:max_pages]
+    # Always force last 3 pages in for revisions
+    for page in pages[-3:]:
+        add_page(page)
+
+    
 
     logging.info(f"Selected pages: {[p['page_number'] for p in selected]}")
 
@@ -330,7 +339,7 @@ def process_one_file(
     }
 
     prepared_text = (
-        build_extraction_text(doc, drug_keywords, max_pages=20, multi_window=2)
+        build_extraction_text(doc, drug_keywords, max_pages=22, multi_window=2)
         + f"\n\nEXTRACT DATA FOR '{drug_name}' ONLY.\n"
     )
 
@@ -358,7 +367,7 @@ def load_existing_records(output_jsonl: str) -> set:
             try:
                 record = json.loads(line)
                 meta = record.get("policy_metadata", {})
-                src = meta.get("source_file")
+                src = meta.get("policy_id")
                 date = meta.get("effective_date")
                 if src or date:
                     seen.add((src, date))
@@ -437,7 +446,7 @@ def search_and_process_limited(
         try:
             result = process_one_file(filepath, drug_name, drug_keywords)
             meta = result.get("policy_metadata", {})
-            key = (meta.get("source_file"), meta.get("effective_date"))
+            key = (meta.get("policy_id"), meta.get("effective_date"))
 
             if key in existing:
                 logging.info(f"Skipping duplicate: {key}")
