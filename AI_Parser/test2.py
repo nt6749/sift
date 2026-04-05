@@ -5,12 +5,14 @@ import logging
 import time
 from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
-import google.generativeai as genai
+from google import genai
 import pdfplumber
 import requests
 import urllib
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+load_dotenv("key.env")
 
 # ----------------------------
 # Config
@@ -39,8 +41,8 @@ SECTION_KEYWORDS = [
 # ----------------------------
 # Gemini setup
 # ----------------------------
-api_key = "AIzaSyA6mfqOC4OUr1rHXgvrTjstuO_wT_YuuJg"
-genai.configure(api_key=api_key)
+API_KEY = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=API_KEY)
 
 MODEL_NAME = "gemini-2.5-flash"
 
@@ -292,7 +294,7 @@ def contains_any(text: str, keywords: List[str]) -> bool:
 def build_extraction_text(
     doc: Dict[str, Any],
     drug_keywords: List[str],
-    max_pages: int = 12
+    max_pages: int = 20
 ) -> str:
     classification = doc.get("classification", "unknown")
     pages = doc.get("pages", [])
@@ -362,10 +364,12 @@ def build_extraction_text(
 # 5. Gemini call
 # ----------------------------
 def run_extraction(model_name: str, prepared_text: str) -> Dict[str, Any]:
-    model = genai.GenerativeModel(model_name)
-
     prompt = GENERAL_EXTRACTION_PROMPT + "\n\nPolicy text:\n" + prepared_text
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-3-flash-preview",
+        contents=prompt
+    )
+
     raw = response.text.strip()
 
     raw = re.sub(r"^```json\s*", "", raw)
@@ -382,7 +386,7 @@ if __name__ == "__main__":
     drug_keywords = ["rituximab", "rituxan"]
 
     query_templates = [
-        'Cigna Drug and Biologic Coverage Policy "{drug}" pdf'
+        'https://fm.formularynavigator.com/FBO/208/MDL_EmployerGroupMyPriority_2026.pdf'
     ]
 
     results = search_queries_for_drug(
@@ -414,18 +418,25 @@ if __name__ == "__main__":
         print("No PDF text extracted.")
         raise SystemExit
 
-    doc = {
+    doc1 = {
         "source_file": filepath,
-        "classification": "single_drug_simple",
+        "classification": "multi_drug_large",
         "pages": pages
     }
 
-    prepared_text = build_extraction_text(doc, drug_keywords, max_pages=10)
+    prepared_text = build_extraction_text(doc1, drug_keywords, max_pages=20) + f"EXTRACT DATA FOR '{drug_name}' ONLY.\n\n"
 
     print("\n===== PREPARED TEXT PREVIEW =====\n")
     print(prepared_text[:3000])
 
     result = run_extraction(MODEL_NAME, prepared_text)
+
+    output_file = "medical_policy_extractions.jsonl"
+
+    with open(output_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+    print(f"\nSaved result to {output_file}")
 
     print("\n===== EXTRACTION RESULT =====\n")
     print(json.dumps(result, indent=2, ensure_ascii=False))
